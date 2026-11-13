@@ -1,0 +1,8 @@
+# working screenshots — not part of the published site
+/hero.png
+/fullpage.png
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp

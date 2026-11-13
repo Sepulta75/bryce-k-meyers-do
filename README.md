@@ -1,8 +1,8 @@
 # Dr. Bryce K. Meyers, DO, MPH, FAAFP — landing page
 
 A single-page, dependency-free landing site for Bryce K. Meyers, DO, MPH, FAAFP —
-board-certified family physician, U.S. Army veteran, and physician executive in
-Columbia, Maryland.
+board-certified family physician, U.S. Army veteran, and physician executive at
+Be Well Health Center at Tysons (Premise Health) in McLean, Virginia.
 
 ## Stack
 

@@ -91,8 +91,8 @@ async function handleSubmit(
   button.textContent = 'Request received ✓';
   message.style.color = COLOR_SUCCESS;
   message.textContent =
-    `Thank you, ${result.value.firstName}! Our office will contact you within one business day. ` +
-    'For anything urgent, please call (703) 720-1290.';
+    'Thank you — your message has been received. Our office will contact you ' +
+    'within one business day. For anything urgent, please call (703) 720-1290.';
 
   form.reset();
 

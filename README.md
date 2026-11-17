@@ -107,8 +107,23 @@ typecheck + lint + build and publishes `dist/`. `VITE_SITE_BASE` is set to
 **Render** — the service runs as a Docker web service. `Dockerfile` is a
 two-stage build (Node compiles the bundle, nginx serves it) and `nginx.conf`
 adds gzip, immutable caching for hashed assets, the `X-Robots-Tag: noindex`
-header, and a fallback to `index.html`. Build args mirror the env vars above and
-every connector defaults to off.
+header, and a fallback to `index.html`.
+
+### Contact relay (Render only)
+
+The Render image runs `server/contact-relay.mjs` on loopback and nginx proxies
+`/api/` to it. The browser only ever posts to `/api/contact`; the bot token is
+read from the container environment, so it never enters the bundle. Set these in
+the Render dashboard (never as build args):
+
+| Variable | Purpose |
+| --- | --- |
+| `TELEGRAM_BOT_TOKEN` | token from @BotFather |
+| `TELEGRAM_CHAT_ID` | destination chat/channel id |
+| `RELAY_PORT` | loopback port for the relay (default `8787`) |
+
+`GET /api/health` reports whether Telegram is configured; the relay rate-limits
+submissions per IP and caps request bodies at 8 KB.
 
 ## Notes
 

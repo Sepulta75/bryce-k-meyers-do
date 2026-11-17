@@ -1,0 +1,16 @@
+/**
+ * Stylesheet entry point.
+ *
+ * Tailwind v4 is wired up for utilities and design tokens, but its preflight
+ * (base reset) is deliberately NOT imported: the site ships a hand-tuned
+ * stylesheet in `site.css`, and a global reset would shift the typography and
+ * spacing that design was built on. Utilities are available for new work.
+ *
+ * Order matters: Tailwind layers first, then the site stylesheet, so existing
+ * component rules always win over utility defaults.
+ */
+@layer theme, base, components, utilities;
+
+@import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/utilities.css' layer(utilities);
+@import './site.css';

@@ -1,0 +1,38 @@
+# Render Blueprint — infrastructure as code for this service.
+#
+# What it does: `render.yaml` is the declarative source of truth for the Render
+# resources in this repo. Create a Blueprint from it (New → Blueprint) and Render
+# provisions/updates these services to match the file, instead of relying on
+# settings clicked into the dashboard by hand.
+#
+# Notes:
+#  - `sync: false` means "the value comes from the dashboard / prompt, never from git",
+#    which is how the bot token stays out of the repository.
+#  - Renaming or changing `name` creates a new service; the URL changes with it.
+#  - The existing service can be adopted by creating a Blueprint for a new
+#    environment (staging/PR previews), or by recreating it here once.
+
+services:
+  - type: web
+    name: bryce-k-meyers-do
+    runtime: docker
+    plan: free
+    region: virginia
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: CONNECTOR_WEBHOOK_URL
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: CONTACT_EMAIL_TO
+        sync: false
+      - key: CONTACT_EMAIL_FROM
+        sync: false

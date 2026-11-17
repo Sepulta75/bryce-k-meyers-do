@@ -1,28 +1,36 @@
 /**
- * Contact relay — the server-side half of the Telegram connector.
+ * Contact relay — the server side of the site's messaging connectors.
  *
- * The browser never sees the bot token: it POSTs to /api/contact, this process
- * adds the credentials and calls the Telegram Bot API. Runs inside the same
- * container as nginx (nginx proxies /api/ here), Node stdlib only — no deps.
+ * The browser never sees a credential: it POSTs to /api/contact, this process
+ * fans the message out to whichever channels are configured, and reports how
+ * each one went. Node stdlib only — no dependencies.
+ *
+ * Channels (all optional; each is enabled purely by its env vars being present):
+ *   telegram  TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
+ *   webhook   CONNECTOR_WEBHOOK_URL   (Slack, Zapier, Make, Sheets, any CRM)
+ *   email     RESEND_API_KEY + CONTACT_EMAIL_TO + CONTACT_EMAIL_FROM
  *
  * Env:
- *   TELEGRAM_BOT_TOKEN  (required) token from @BotFather
- *   TELEGRAM_CHAT_ID    (required) destination chat / channel id
- *   RELAY_PORT          (default 8787) loopback port nginx proxies to
+ *   RELAY_PORT        default 8787 (nginx proxies /api/ here)
+ *   RELAY_TIMEOUT_MS  per-channel timeout, default 10000
  */
 import { createServer } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
 
 const PORT = Number(process.env.RELAY_PORT ?? 8787);
-const BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN ?? '').trim();
-const CHAT_ID = (process.env.TELEGRAM_CHAT_ID ?? '').trim();
+const TIMEOUT_MS = Number(process.env.RELAY_TIMEOUT_MS ?? 10_000);
+
+const env = (name) => (process.env[name] ?? '').trim();
+
+const TELEGRAM_BOT_TOKEN = env('TELEGRAM_BOT_TOKEN');
+const TELEGRAM_CHAT_ID = env('TELEGRAM_CHAT_ID');
+const WEBHOOK_URL = env('CONNECTOR_WEBHOOK_URL');
+const RESEND_API_KEY = env('RESEND_API_KEY');
+const EMAIL_TO = env('CONTACT_EMAIL_TO');
+const EMAIL_FROM = env('CONTACT_EMAIL_FROM');
 
 const MAX_BODY_BYTES = 8 * 1024;
-const TELEGRAM_TIMEOUT_MS = 10_000;
-
-/** Crude in-memory flood control: 5 submissions per IP per 10 minutes. */
 const RATE_WINDOW_MS = 10 * 60 * 1000;
-const RATE_MAX = 5;
+const RATE_MAX = 10;
 const hits = new Map();
 
 function rateLimited(ip) {
@@ -38,13 +46,12 @@ function rateLimited(ip) {
 }
 
 function send(res, status, payload) {
-  const body = JSON.stringify(payload);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
   });
-  res.end(body);
+  res.end(JSON.stringify(payload));
 }
 
 function readJson(req) {
@@ -71,28 +78,79 @@ function readJson(req) {
   });
 }
 
-async function sendToTelegram(text) {
-  const endpoint = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+async function postJson(url, headers, body) {
   const controller = new AbortController();
-  const timer = setTimeout(() => { controller.abort(); }, TELEGRAM_TIMEOUT_MS);
-
+  const timer = setTimeout(() => { controller.abort(); }, TIMEOUT_MS);
   try {
-    const response = await fetch(endpoint, {
+    const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: CHAT_ID,
-        text,
-        disable_web_page_preview: true,
-      }),
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
-    const payload = await response.json().catch(() => ({}));
-    return { ok: response.ok && payload.ok === true, payload };
+    const text = await response.text();
+    let payload = null;
+    try { payload = JSON.parse(text); } catch { payload = text.slice(0, 200); }
+    return { ok: response.ok, status: response.status, payload };
   } finally {
     clearTimeout(timer);
   }
 }
+
+/* ------------------------------- channels -------------------------------- */
+
+const channels = [
+  {
+    id: 'telegram',
+    label: 'Telegram',
+    ready: TELEGRAM_BOT_TOKEN.length > 0 && TELEGRAM_CHAT_ID.length > 0,
+    detail: TELEGRAM_CHAT_ID.length > 0 ? 'chat configured' : 'TELEGRAM_CHAT_ID missing',
+    async deliver({ subject, text }) {
+      const { ok, status, payload } = await postJson(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {},
+        { chat_id: TELEGRAM_CHAT_ID, text: `${subject}\n\n${text}`, disable_web_page_preview: true },
+      );
+      return {
+        ok: ok && payload?.ok === true,
+        detail: ok ? `delivered (message_id ${payload?.result?.message_id ?? '?'})` : `telegram HTTP ${status}`,
+      };
+    },
+  },
+  {
+    id: 'webhook',
+    label: 'Webhook',
+    ready: WEBHOOK_URL.length > 0,
+    detail: WEBHOOK_URL.length > 0 ? 'endpoint configured' : 'CONNECTOR_WEBHOOK_URL missing',
+    async deliver(message) {
+      const { ok, status } = await postJson(WEBHOOK_URL, {}, {
+        source: 'bryce-k-meyers-do',
+        channel: 'webhook',
+        subject: message.subject,
+        text: message.text,
+        replyTo: message.replyTo,
+        receivedAt: new Date().toISOString(),
+      });
+      return { ok, detail: `webhook HTTP ${status}` };
+    },
+  },
+  {
+    id: 'email',
+    label: 'Email',
+    ready: RESEND_API_KEY.length > 0 && EMAIL_TO.length > 0 && EMAIL_FROM.length > 0,
+    detail: EMAIL_TO.length > 0 ? `to ${EMAIL_TO}` : 'CONTACT_EMAIL_TO missing',
+    async deliver({ subject, text, replyTo }) {
+      const { ok, status } = await postJson('https://api.resend.com/emails',
+        { Authorization: `Bearer ${RESEND_API_KEY}` },
+        { from: EMAIL_FROM, to: [EMAIL_TO], reply_to: replyTo, subject, text });
+      return { ok, detail: `resend HTTP ${status}` };
+    },
+  },
+];
+
+const activeChannels = () => channels.filter((c) => c.ready);
+
+/* -------------------------------- server --------------------------------- */
 
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
@@ -100,8 +158,8 @@ const server = createServer((req, res) => {
   if (req.method === 'GET' && url.pathname === '/api/health') {
     send(res, 200, {
       ok: true,
-      telegram: BOT_TOKEN.length > 0 && CHAT_ID.length > 0,
-      chatConfigured: CHAT_ID.length > 0,
+      channels: channels.map((c) => ({ id: c.id, enabled: c.ready, detail: c.detail })),
+      active: activeChannels().map((c) => c.id),
     });
     return;
   }
@@ -126,8 +184,8 @@ const server = createServer((req, res) => {
     return;
   }
 
-  if (BOT_TOKEN.length === 0 || CHAT_ID.length === 0) {
-    send(res, 503, { ok: false, error: 'telegram credentials are not configured' });
+  if (activeChannels().length === 0) {
+    send(res, 503, { ok: false, error: 'no delivery channel is configured' });
     return;
   }
 
@@ -142,35 +200,40 @@ const server = createServer((req, res) => {
 
     const text = typeof body?.text === 'string' ? body.text.trim() : '';
     const subject = typeof body?.subject === 'string' ? body.subject.trim() : 'Website enquiry';
+    const replyTo = typeof body?.replyTo === 'string' ? body.replyTo.trim() : '';
 
     if (text.length === 0) {
       send(res, 400, { ok: false, error: 'text is required' });
       return;
     }
 
-    try {
-      const { ok, payload } = await sendToTelegram(`${subject}\n\n${text}`);
-      if (!ok) {
-        console.error('[relay] telegram rejected:', payload?.description ?? 'unknown');
-        send(res, 502, { ok: false, error: 'telegram rejected the message' });
-        return;
-      }
-      console.info('[relay] delivered message', payload.result?.message_id);
-      send(res, 200, { ok: true, messageId: payload.result?.message_id ?? null });
-    } catch (error) {
-      console.error('[relay] send failed:', error.message);
-      send(res, 502, { ok: false, error: 'telegram unreachable' });
+    const message = { subject, text, replyTo };
+    const results = await Promise.all(
+      activeChannels().map(async (channel) => {
+        try {
+          const outcome = await channel.deliver(message);
+          if (!outcome.ok) console.error(`[relay] ${channel.id} failed: ${outcome.detail}`);
+          return { channel: channel.id, ok: outcome.ok, detail: outcome.detail };
+        } catch (error) {
+          console.error(`[relay] ${channel.id} threw: ${error.message}`);
+          return { channel: channel.id, ok: false, detail: error.message };
+        }
+      }),
+    );
+
+    const delivered = results.filter((r) => r.ok);
+    if (delivered.length === 0) {
+      send(res, 502, { ok: false, error: 'every channel rejected the message', results });
+      return;
     }
+
+    console.info(`[relay] delivered via ${delivered.map((r) => r.channel).join(', ')}`);
+    send(res, 200, { ok: true, results });
   })();
 });
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.info(`[relay] listening on 127.0.0.1:${PORT} (telegram configured: ${String(BOT_TOKEN.length > 0 && CHAT_ID.length > 0)})`);
+  console.info(
+    `[relay] listening on 127.0.0.1:${PORT} | active channels: ${activeChannels().map((c) => c.id).join(', ') || 'none'}`,
+  );
 });
-
-// Constant-time comparison helper kept for future per-client tokens.
-export function safeEqual(a, b) {
-  const ab = Buffer.from(String(a));
-  const bb = Buffer.from(String(b));
-  return ab.length === bb.length && timingSafeEqual(ab, bb);
-}
